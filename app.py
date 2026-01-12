@@ -9,17 +9,16 @@ from PIL import Image, ImageDraw
 
 # ---------------- FLASK APP ----------------
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max
+app.config["UPLOAD_FOLDER"] = "uploads"
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB
 
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
-# ---------------- MODEL LOAD (SAFE FOR RENDER) ----------------
+# ---------------- MODEL LOAD ----------------
 print("Loading YOLO model...")
 
 model = YOLO("best.pt")
-model.to("cpu")                 # 🔴 FORCE CPU
-model.overrides["fuse"] = False # 🔴 DISABLE FUSION (CRITICAL)
+model.to("cpu")  # 🔴 FORCE CPU (Render-safe)
 
 CONF = 0.3
 
@@ -32,16 +31,17 @@ def detect_people(image):
     if image is None:
         return None, [], 0, "LOW", 0, []
 
-    # Convert & resize (HARD memory cap)
+    # Convert & resize (hard memory cap)
     img = image.convert("RGB")
     img = img.resize((640, 640))
 
-    # YOLO prediction (CPU-safe)
+    # 🔴 SAFE YOLO PREDICT (NO FUSION, NO CLI ISSUES)
     results = model.predict(
         img,
         conf=CONF,
         device="cpu",
         half=False,
+        fuse=False,        # ✅ THIS IS THE KEY FIX
         verbose=False
     )
 
@@ -57,7 +57,7 @@ def detect_people(image):
         for box in r.boxes:
             cls = int(box.cls[0])
             label = model.names[cls].lower()
-            conf = float(box.conf[0])
+            confidence = float(box.conf[0])
 
             if label not in ["person", "human"]:
                 continue
@@ -65,14 +65,17 @@ def detect_people(image):
             count += 1
             x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-            # Draw bounding box
             draw.rectangle([x1, y1, x2, y2], outline="#00fff7", width=3)
-            draw.text((x1, max(y1 - 15, 0)), f"HUMAN {conf:.2f}", fill="#00fff7")
+            draw.text(
+                (x1, max(y1 - 15, 0)),
+                f"HUMAN {confidence:.2f}",
+                fill="#00fff7"
+            )
 
-            logs.append(f"TARGET LOCKED | CONF={conf:.2f}")
+            logs.append(f"TARGET LOCKED | CONF={confidence:.2f}")
             detections.append({
                 "bbox": [x1, y1, x2, y2],
-                "confidence": round(conf, 2),
+                "confidence": round(confidence, 2),
                 "label": "HUMAN"
             })
 
@@ -81,7 +84,7 @@ def detect_people(image):
 
     fps = round(1 / max(time.time() - start, 0.001), 2)
 
-    # Threat level logic
+    # Threat assessment
     if count >= 3:
         threat = "HIGH"
     elif count > 0:
@@ -117,7 +120,6 @@ def predict():
 
         annotated_img, logs, count, threat, fps, detections = detect_people(image)
 
-        # Encode image → base64
         buffer = BytesIO()
         annotated_img.save(buffer, format="PNG")
         img_base64 = base64.b64encode(buffer.getvalue()).decode()
