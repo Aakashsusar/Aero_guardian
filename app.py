@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw
 # ---------------- FLASK APP ----------------
 app = Flask(__name__)
 app.config["UPLOAD_FOLDER"] = "uploads"
-app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 
 os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
@@ -18,7 +18,8 @@ os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 print("Loading YOLO model...")
 
 model = YOLO("best.pt")
-model.to("cpu")  # 🔴 FORCE CPU (Render-safe)
+model.to("cpu")
+model.model.eval()  # inference mode only
 
 CONF = 0.3
 
@@ -28,49 +29,36 @@ print("Model loaded successfully!")
 def detect_people(image):
     start = time.time()
 
-    if image is None:
-        return None, [], 0, "LOW", 0, []
+    img = image.convert("RGB").resize((640, 640))
 
-    # Convert & resize (hard memory cap)
-    img = image.convert("RGB")
-    img = img.resize((640, 640))
-
-    # 🔴 SAFE YOLO PREDICT (NO FUSION, NO CLI ISSUES)
     results = model.predict(
         img,
         conf=CONF,
         device="cpu",
-        half=False,
-        fuse=False,        # ✅ THIS IS THE KEY FIX
         verbose=False
     )
 
     draw = ImageDraw.Draw(img)
-    logs = []
-    detections = []
+    logs, detections = [], []
     count = 0
 
     for r in results:
-        if r.boxes is None:
+        if not r.boxes:
             continue
 
         for box in r.boxes:
             cls = int(box.cls[0])
             label = model.names[cls].lower()
-            confidence = float(box.conf[0])
 
-            if label not in ["person", "human"]:
+            if label != "person":
                 continue
 
+            confidence = float(box.conf[0])
             count += 1
             x1, y1, x2, y2 = map(int, box.xyxy[0])
 
             draw.rectangle([x1, y1, x2, y2], outline="#00fff7", width=3)
-            draw.text(
-                (x1, max(y1 - 15, 0)),
-                f"HUMAN {confidence:.2f}",
-                fill="#00fff7"
-            )
+            draw.text((x1, max(y1 - 15, 0)), f"HUMAN {confidence:.2f}", fill="#00fff7")
 
             logs.append(f"TARGET LOCKED | CONF={confidence:.2f}")
             detections.append({
@@ -84,13 +72,11 @@ def detect_people(image):
 
     fps = round(1 / max(time.time() - start, 0.001), 2)
 
-    # Threat assessment
+    threat = "LOW"
     if count >= 3:
         threat = "HIGH"
     elif count > 0:
         threat = "MEDIUM"
-    else:
-        threat = "LOW"
 
     return img, logs, count, threat, fps, detections
 
@@ -103,26 +89,15 @@ def index():
 def predict():
     try:
         if "image" not in request.files:
-            return jsonify({
-                "status": "error",
-                "message": "No image file provided"
-            }), 400
+            return jsonify({"status": "error", "message": "No image"}), 400
 
-        file = request.files["image"]
+        image = Image.open(request.files["image"].stream)
 
-        try:
-            image = Image.open(file.stream)
-        except Exception:
-            return jsonify({
-                "status": "error",
-                "message": "Invalid image format"
-            }), 400
+        annotated, logs, count, threat, fps, detections = detect_people(image)
 
-        annotated_img, logs, count, threat, fps, detections = detect_people(image)
-
-        buffer = BytesIO()
-        annotated_img.save(buffer, format="PNG")
-        img_base64 = base64.b64encode(buffer.getvalue()).decode()
+        buf = BytesIO()
+        annotated.save(buf, format="PNG")
+        img_b64 = base64.b64encode(buf.getvalue()).decode()
 
         return jsonify({
             "status": "success",
@@ -131,16 +106,8 @@ def predict():
             "fps": fps,
             "logs": logs,
             "detections": detections,
-            "annotated_image": f"data:image/png;base64,{img_base64}"
+            "annotated_image": f"data:image/png;base64,{img_b64}"
         })
 
     except Exception as e:
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 500
-
-# ---------------- ENTRY POINT ----------------
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+        return jsonify({"status": "error", "message": str(e)}), 500
