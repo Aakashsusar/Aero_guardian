@@ -2,6 +2,7 @@ import time
 import os
 import base64
 from io import BytesIO
+
 from flask import Flask, render_template, request, jsonify
 from ultralytics import YOLO
 from PIL import Image, ImageDraw
@@ -9,35 +10,45 @@ from PIL import Image, ImageDraw
 # ---------------- FLASK APP ----------------
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max
 
-# Create uploads directory if it doesn't exist
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# ---------------- MODEL (Load once at startup) ----------------
+# ---------------- MODEL LOAD (SAFE FOR RENDER) ----------------
 print("Loading YOLO model...")
+
 model = YOLO("best.pt")
+model.to("cpu")                 # 🔴 FORCE CPU
+model.model.fuse = False        # 🔴 DISABLE FUSION (CRITICAL)
+
 CONF = 0.3
+
 print("Model loaded successfully!")
 
-# ---------------- DETECTION LOGIC (Preserved from original) ----------------
+# ---------------- DETECTION LOGIC ----------------
 def detect_people(image):
-    """
-    Core ML detection logic - UNCHANGED from original implementation
-    Detects people in the provided image and returns annotated results
-    """
     start = time.time()
 
     if image is None:
-        return None, [], 0, "LOW", 0
+        return None, [], 0, "LOW", 0, []
 
+    # Convert & resize (HARD memory cap)
     img = image.convert("RGB")
-    results = model.predict(img, conf=CONF, verbose=False)
+    img = img.resize((640, 640))
+
+    # YOLO prediction (CPU-safe)
+    results = model.predict(
+        img,
+        conf=CONF,
+        device="cpu",
+        half=False,
+        verbose=False
+    )
 
     draw = ImageDraw.Draw(img)
     logs = []
-    count = 0
     detections = []
+    count = 0
 
     for r in results:
         if r.boxes is None:
@@ -54,10 +65,9 @@ def detect_people(image):
             count += 1
             x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-            # Draw bounding box with cyan color
-            pulse = int(2 + conf * 4)
-            draw.rectangle([x1, y1, x2, y2], outline="#00fff7", width=pulse)
-            draw.text((x1, y1 - 14), f"HUMAN {conf:.2f}", fill="#00fff7")
+            # Draw bounding box
+            draw.rectangle([x1, y1, x2, y2], outline="#00fff7", width=3)
+            draw.text((x1, max(y1 - 15, 0)), f"HUMAN {conf:.2f}", fill="#00fff7")
 
             logs.append(f"TARGET LOCKED | CONF={conf:.2f}")
             detections.append({
@@ -69,74 +79,57 @@ def detect_people(image):
     if count == 0:
         logs.append("AREA CLEAR")
 
-    fps = 1 / max(time.time() - start, 0.001)
+    fps = round(1 / max(time.time() - start, 0.001), 2)
 
-    # Threat level calculation
-    threat = "LOW"
+    # Threat level logic
     if count >= 3:
         threat = "HIGH"
     elif count > 0:
         threat = "MEDIUM"
+    else:
+        threat = "LOW"
 
     return img, logs, count, threat, fps, detections
 
-# ---------------- FLASK ROUTES ----------------
-
-@app.route('/')
+# ---------------- ROUTES ----------------
+@app.route("/")
 def index():
-    """Serve the main UI"""
-    return render_template('index.html')
+    return render_template("index.html")
 
-@app.route('/predict', methods=['POST'])
+@app.route("/predict", methods=["POST"])
 def predict():
-    """
-    API endpoint for people detection
-    Accepts: Image file upload or camera blob
-    Returns: JSON with detection results
-    """
     try:
-        # Check if image file is present
-        if 'image' not in request.files:
+        if "image" not in request.files:
             return jsonify({
                 "status": "error",
                 "message": "No image file provided"
             }), 400
 
-        file = request.files['image']
-        
-        # Allow empty filename for camera captures (blobs)
-        if file.filename == '' and not file:
-            return jsonify({
-                "status": "error",
-                "message": "Empty file"
-            }), 400
+        file = request.files["image"]
 
-        # Read and process the image
         try:
             image = Image.open(file.stream)
-        except Exception as e:
+        except Exception:
             return jsonify({
                 "status": "error",
-                "message": f"Invalid image format: {str(e)}"
+                "message": "Invalid image format"
             }), 400
-        
-        # Run detection using existing ML logic
+
         annotated_img, logs, count, threat, fps, detections = detect_people(image)
 
-        # Convert annotated image to base64 for response
-        buffered = BytesIO()
-        annotated_img.save(buffered, format="PNG")
-        img_str = base64.b64encode(buffered.getvalue()).decode()
+        # Encode image → base64
+        buffer = BytesIO()
+        annotated_img.save(buffer, format="PNG")
+        img_base64 = base64.b64encode(buffer.getvalue()).decode()
 
-        # Return clean JSON response
         return jsonify({
             "status": "success",
             "people_count": count,
             "threat_level": threat,
-            "fps": round(fps, 1),
+            "fps": fps,
             "logs": logs,
             "detections": detections,
-            "annotated_image": f"data:image/png;base64,{img_str}"
+            "annotated_image": f"data:image/png;base64,{img_base64}"
         })
 
     except Exception as e:
@@ -145,6 +138,7 @@ def predict():
             "message": str(e)
         }), 500
 
-# ---------------- RUN SERVER ----------------
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=7860, debug=True)
+# ---------------- ENTRY POINT ----------------
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
