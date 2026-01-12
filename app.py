@@ -19,7 +19,7 @@ print("Loading YOLO model...")
 
 model = YOLO("best.pt")
 model.to("cpu")                 # 🔴 FORCE CPU
-model.model.fuse = False        # 🔴 DISABLE FUSION (CRITICAL)
+model.overrides["fuse"] = False # 🔴 DISABLE FUSION (CRITICAL)
 
 CONF = 0.3
 
