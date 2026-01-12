@@ -2,6 +2,5 @@ services:
   - type: web
     name: aero-guardian
     env: python
-    runtime: python-3.10.13
     buildCommand: pip install --prefer-binary -r requirements.txt
     startCommand: gunicorn wsgi:app --workers 1 --threads 1 --timeout 120
